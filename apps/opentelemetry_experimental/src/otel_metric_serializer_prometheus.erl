@@ -16,14 +16,9 @@
 %% @end
 %%%-------------------------------------------------------------------------
 
--module(otel_metric_exporter_prometheus).
+-module(otel_metric_serializer_prometheus).
 
--behaviour(otel_exporter_metrics).
-
--export([init/1,
-         export/3,
-         force_flush/0,
-         shutdown/1]).
+-export([serialize/3]).
 
 -include_lib("opentelemetry_api/include/opentelemetry.hrl").
 -include_lib("opentelemetry_api_experimental/include/otel_metrics.hrl").
@@ -43,17 +38,9 @@
 -define(LF, 10).
 -define(SP, 32).
 
-init(Opts) ->
-    {ok, maps:with(maps:keys(?DEFAULT_OPTS), maps:merge(?DEFAULT_OPTS, Opts))}.
-
-export(Metrics, Resource, Opts) ->
+serialize(Metrics, Resource, Opts0) ->
+    Opts = maps:with(maps:keys(?DEFAULT_OPTS), maps:merge(?DEFAULT_OPTS, Opts0)),
     parse_metrics(Metrics, Resource, Opts).
-
-force_flush() ->
-    ok.
-
-shutdown(_) ->
-    ok.
 
 parse_metrics(Metrics, Resource, #{add_target_info:=AddTargetInfo,order:=Order} = Opts) ->
     ParsedMetrics = lists:foldl(
@@ -447,8 +434,8 @@ metrics_to_string(Metrics) ->
 
 metrics_to_string(Metrics, Opts) ->
     Resource = otel_resource:create(#{"res" => "b"}, "url"),
-    {ok, Opts1} = init(maps:merge(?TEST_DEFAULT_OPTS, Opts)),
-    iolist_to_binary(parse_metrics(Metrics, Resource, Opts1)).
+    Opts1 = maps:merge(?TEST_DEFAULT_OPTS, Opts),
+    iolist_to_binary(serialize(Metrics, Resource, Opts1)).
 
 lines_join(Lines) ->
     iolist_to_binary(lists:join(?LF, Lines)).

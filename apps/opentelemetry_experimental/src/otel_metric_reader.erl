@@ -27,6 +27,7 @@
 -export([start_link/3,
          collect/1,
          call_collect/1,
+         collect/2,
          checkpoint_generation/1,
          shutdown/1]).
 
@@ -71,6 +72,13 @@ collect(ReaderPid) ->
 
 call_collect(ReaderPid) ->
     gen_server:call(ReaderPid, collect).
+
+%% -type result_fun(T) :: fun(([opentelemetry_exporter_metrics_service_pb:metric()],
+%%                             otel_resource:t() | undefined) -> T).
+%% -spec collect(Reader :: gen_server:server_ref(), result_fun(T)) -> T.
+collect(Reader, ResultFun)
+  when is_function(ResultFun, 2) ->
+    gen_server:call(Reader, {collect, ResultFun}).
 
 shutdown(ReaderPid) ->
     gen_server:call(ReaderPid, shutdown).
@@ -141,7 +149,11 @@ handle_continue(register_with_server, State=#state{provider_sup=ProviderSup,
 
 handle_call(collect, _From, State) ->
     State1 = update_timer(State),
-    Reply = collect_and_export(State1),
+    collect_and_export(State1),
+    {reply, ok, State1};
+handle_call({collect, ResultFun}, _From, State) ->
+    State1 = update_timer(State),
+    Reply = collect_(ResultFun, State1),
     {reply, Reply, State1};
 handle_call(shutdown, _From, State) ->
     {reply, ok, State};
@@ -171,18 +183,23 @@ update_timer(State=#state{export_interval_ms=ExporterIntervalMs, tref=TRef})
 update_timer(State) ->
     State.
 
+collect_(ResultFun,
+         #state{id=ReaderId,
+                callbacks_tab=CallbacksTab,
+                streams_tab=StreamsTab,
+                metrics_tab=MetricsTab,
+                exemplars_tab=ExemplarsTab,
+                resource=Resource,
+                producers=Producers}) ->
+    Metrics = run_collection(CallbacksTab, StreamsTab, MetricsTab, ExemplarsTab, ReaderId, Producers),
+    ResultFun(Metrics, Resource).
+
 collect_and_export(#state{exporter=undefined}) ->
     ok;
-collect_and_export(#state{id=ReaderId,
-                          exporter={_ExporterModule, _Config}=Exporter,
-                          callbacks_tab=CallbacksTab,
-                          streams_tab=StreamsTab,
-                          metrics_tab=MetricsTab,
-                          exemplars_tab=ExemplarsTab,
-                          resource=Resource,
-                          producers=Producers}) ->
-    Metrics = run_collection(CallbacksTab, StreamsTab, MetricsTab, ExemplarsTab, ReaderId, Producers),
-    otel_exporter_metrics:export(Exporter, Metrics, Resource).
+collect_and_export(State = #state{exporter={_ExporterModule, _Config}=Exporter}) ->
+    collect_(fun(Metrics, Resource) ->
+                     otel_exporter_metrics:export(Exporter, Metrics, Resource)
+             end, State).
 
 run_collection(CallbacksTab, StreamsTab, MetricsTab, ExemplarsTab, ReaderId, Producers) ->
     %% collect from view aggregations table and then export
