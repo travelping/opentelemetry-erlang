@@ -21,6 +21,7 @@
 
 -record(opts,{
     add_scope_info :: boolean(),
+    add_target_info :: boolean(),
     add_total_suffix :: boolean(),
     order :: maps:iterator_order()
 }).
@@ -43,10 +44,11 @@
 
 init(Opts) ->
     {ok, #opts{
-        add_scope_info = maps:get(add_scope_info, Opts, true),
-        add_total_suffix = maps:get(add_total_suffix, Opts, true),
-        order = maps:get(order, Opts, undefined)
-    }}.
+            add_scope_info = maps:get(add_scope_info, Opts, false),
+            add_target_info = maps:get(add_target_info, Opts, false),
+            add_total_suffix = maps:get(add_total_suffix, Opts, true),
+            order = maps:get(order, Opts, undefined)
+           }}.
 
 export(metrics, Metrics, Resource, Opts) ->
     parse_metrics(Metrics, Resource, Opts).
@@ -57,7 +59,7 @@ force_flush() ->
 shutdown(_) ->
     ok.
 
-parse_metrics(Metrics, Resource, #opts{order=Order} = Opts) ->
+parse_metrics(Metrics, Resource, #opts{add_target_info=AddTargetInfo,order=Order} = Opts) ->
     ParsedMetrics = lists:foldl(
         fun(#metric{scope=Scope} = Metric, Acc) ->
             Acc1 = case Opts of
@@ -74,8 +76,16 @@ parse_metrics(Metrics, Resource, #opts{order=Order} = Opts) ->
     ),
 
     ResourceAttributes = otel_attributes:map(otel_resource:attributes(Resource)),
-    TargetInfoMetric = fake_info_metric(target, #instrumentation_scope{}, ResourceAttributes, <<"Target metadata">>),
-    ParsedMetrics1 = parse_and_accumulate_metric(TargetInfoMetric, ParsedMetrics, Opts),
+    ParsedMetrics1 =
+        case AddTargetInfo of
+            true ->
+                TargetInfoMetric =
+                    fake_info_metric(
+                      target, #instrumentation_scope{}, ResourceAttributes, <<"Target metadata">>),
+                parse_and_accumulate_metric(TargetInfoMetric, ParsedMetrics, Opts);
+            false ->
+                ParsedMetrics
+        end,
 
     ParsedMetricsIter = maps:iterator(ParsedMetrics1, Order),
     maps:fold(fun(_Name, #{preamble := Preamble, data := Data}, Acc) -> [[Preamble | Data] | Acc] end, [], ParsedMetricsIter).
@@ -406,6 +416,9 @@ escape_help_char(X) ->
 
 -ifdef(TEST).
 
+-define(TEST_DEFAULT_OPTS, #{add_scope_info => true, add_target_info => true,
+                             add_total_suffix => true, order => ordered}).
+
 nano_to_timestamp(Nano) ->
     Offset = erlang:time_offset(),
     erlang:convert_time_unit(Nano, nanosecond, native) - Offset.
@@ -415,7 +428,7 @@ metrics_to_string(Metrics) ->
 
 metrics_to_string(Metrics, Opts) ->
     Resource = otel_resource:create(#{"res" => "b"}, "url"),
-    {ok, Opts1} = init(Opts#{order => ordered}),
+    {ok, Opts1} = init(maps:merge(?TEST_DEFAULT_OPTS, Opts)),
     lists:flatten(io_lib:format("~ts", [parse_metrics(Metrics, Resource, Opts1)])).
 
 lines_join(Lines) ->
