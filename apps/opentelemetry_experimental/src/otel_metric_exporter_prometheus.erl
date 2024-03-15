@@ -19,13 +19,6 @@
 -module(otel_metric_exporter_prometheus).
 -behavior(otel_exporter).
 
--record(opts,{
-    add_scope_info :: boolean(),
-    add_target_info :: boolean(),
-    add_total_suffix :: boolean(),
-    order :: maps:iterator_order()
-}).
-
 -export([init/1,
          export/4,
          force_flush/0,
@@ -40,15 +33,14 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-define(DEFAULT_OPTS, #{add_scope_info => false,
+                        add_target_info => false,
+                        add_total_suffix => true,
+                        order => undefined}).
 -define(INFO_METRICS, #{"otel_scope" => true, "target" => true}).
 
 init(Opts) ->
-    {ok, #opts{
-            add_scope_info = maps:get(add_scope_info, Opts, false),
-            add_target_info = maps:get(add_target_info, Opts, false),
-            add_total_suffix = maps:get(add_total_suffix, Opts, true),
-            order = maps:get(order, Opts, undefined)
-           }}.
+    {ok, maps:with(maps:keys(?DEFAULT_OPTS), maps:merge(?DEFAULT_OPTS, Opts))}.
 
 export(metrics, Metrics, Resource, Opts) ->
     parse_metrics(Metrics, Resource, Opts).
@@ -59,11 +51,11 @@ force_flush() ->
 shutdown(_) ->
     ok.
 
-parse_metrics(Metrics, Resource, #opts{add_target_info=AddTargetInfo,order=Order} = Opts) ->
+parse_metrics(Metrics, Resource, #{add_target_info:=AddTargetInfo,order:=Order} = Opts) ->
     ParsedMetrics = lists:foldl(
         fun(#metric{scope=Scope} = Metric, Acc) ->
             Acc1 = case Opts of
-                #opts{add_scope_info=true} ->
+                #{add_scope_info:=true} ->
                     OtelScopeMetric = fake_info_metric(otel_scope, Scope, #{}, <<"OTel Instrumentation Scope">>),
                     parse_and_accumulate_metric(OtelScopeMetric, Acc, Opts);
                 _ ->
@@ -105,7 +97,7 @@ parse_and_accumulate_metric(#metric{name=Name, description=Description, data=Dat
             Acc#{Name => #{preamble => Preamble, data => TextData}}
     end.
 
-fix_metric_name(Name, Unit, Data, #opts{add_total_suffix=AddTotalSuffix}) ->
+fix_metric_name(Name, Unit, Data, #{add_total_suffix:=AddTotalSuffix}) ->
     MetricName = fix_metric_or_label_name(Name),
 
     MetricNameUnit = case Unit of
@@ -271,7 +263,7 @@ data(MetricName, #gauge{datapoints=Datapoints}, Scope, Opts) ->
 data(MetricName, #histogram{datapoints=Datapoints}, Scope, Opts) ->
     data(MetricName, Datapoints, Scope, true, Opts).
 
-data(MetricName, Datapoints, Scope, AddCreated, #opts{add_scope_info=AddScopeInfo}) ->
+data(MetricName, Datapoints, Scope, AddCreated, #{add_scope_info:=AddScopeInfo}) ->
     ScopeLabels = case AddScopeInfo of
         true -> labels(Scope);
         false -> <<>>
