@@ -161,6 +161,8 @@ fix_unit(Unit) when is_atom(Unit) ->
     fix_unit(atom_to_binary(Unit));
 fix_unit(<<"1">>) ->
     <<"ratio">>;
+fix_unit(<<"{", _/binary>>) ->
+    undefined;
 fix_unit(Unit) ->
     case string:split(Unit, "/", all) of
         [_] -> guess_unit(Unit);
