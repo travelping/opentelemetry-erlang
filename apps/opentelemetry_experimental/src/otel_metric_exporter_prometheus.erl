@@ -37,7 +37,10 @@
                         add_target_info => false,
                         add_total_suffix => true,
                         order => undefined}).
--define(INFO_METRICS, #{"otel_scope" => true, "target" => true}).
+-define(INFO_METRICS, #{<<"otel_scope">> => true, <<"target">> => true}).
+
+-define(LF, 10).
+-define(SP, 32).
 
 init(Opts) ->
     {ok, maps:with(maps:keys(?DEFAULT_OPTS), maps:merge(?DEFAULT_OPTS, Opts))}.
@@ -80,7 +83,7 @@ parse_metrics(Metrics, Resource, #{add_target_info:=AddTargetInfo,order:=Order} 
         end,
 
     ParsedMetricsIter = maps:iterator(ParsedMetrics1, Order),
-    maps:fold(fun(_Name, #{preamble := Preamble, data := Data}, Acc) -> [[Preamble | Data] | Acc] end, [], ParsedMetricsIter).
+    maps:fold(fun(_K, V, Acc) -> [Acc, V] end, [], ParsedMetricsIter).
 
 parse_and_accumulate_metric(#metric{name=Name}, Acc, _Opts)
   when is_map_key(Name, Acc) ->
@@ -88,13 +91,13 @@ parse_and_accumulate_metric(#metric{name=Name}, Acc, _Opts)
     Acc;
 parse_and_accumulate_metric(#metric{name=Name, description=Description, data=Data, unit=Unit, scope=Scope}, Acc, Opts) ->
     FixedUnit = fix_unit(Unit),
-    {MetricNameUnit, FullName} = fix_metric_name(atom_to_list(Name), FixedUnit, Data, Opts),
+    {MetricNameUnit, FullName} = fix_metric_name(atom_to_binary(Name), FixedUnit, Data, Opts),
     case data(FullName, Data, Scope, Opts) of
         invalid_temporality ->
             Acc;
         TextData ->
             Preamble = preamble(MetricNameUnit, Description, FixedUnit, Data),
-            Acc#{Name => #{preamble => Preamble, data => TextData}}
+            Acc#{Name => [Preamble, TextData]}
     end.
 
 fix_metric_name(Name, Unit, Data, #{add_total_suffix:=AddTotalSuffix}) ->
@@ -102,20 +105,20 @@ fix_metric_name(Name, Unit, Data, #{add_total_suffix:=AddTotalSuffix}) ->
 
     MetricNameUnit = case Unit of
         undefined -> MetricName;
-        _ -> reverse_append(MetricName, string:reverse([$_ | Unit]))
+        _ -> string_append(MetricName, Unit)
     end,
 
     FullName =
         case Data of
             _ when is_map_key(Name, ?INFO_METRICS) ->
-                string:reverse("_info") ++ MetricNameUnit;
+                string_append(MetricNameUnit, <<"info">>);
             #sum{is_monotonic=true} when AddTotalSuffix =:= true ->
-                reverse_append(MetricNameUnit, string:reverse("_total"));
+                string_append(MetricNameUnit, <<"total">>);
             _ ->
                 MetricNameUnit
     end,
 
-    {string:reverse(MetricNameUnit), string:reverse(FullName)}.
+    {MetricNameUnit, FullName}.
 
 fake_info_metric(Name, Scope, Attributes, Description) ->
     #metric{
@@ -128,40 +131,42 @@ fake_info_metric(Name, Scope, Attributes, Description) ->
         }]}
     }.
 
-reverse_append(ReverseString, ReverseSuffix) ->
-    case string:prefix(ReverseSuffix, ReverseString) of
-        nomatch -> ReverseSuffix ++ ReverseString;
-        _ -> ReverseString
+string_append(String, Suffix) ->
+    case binary:longest_common_suffix([String, Suffix]) of
+        X when X =:= length(Suffix) -> String;
+        _ -> <<String/binary, $_, Suffix/binary>>
     end.
 
-fix_metric_or_label_name([Char | Rest]) when Char >= $0, Char =< $9 ->
-    fix_metric_or_label_name([$_ | Rest], []);
-fix_metric_or_label_name(List) ->
-    fix_metric_or_label_name(List, []).
+fix_metric_or_label_name(<<Char/utf8, Rest/binary>>) when Char >= $0, Char =< $9 ->
+    fix_metric_or_label_name(Rest, true, <<$_>>);
+fix_metric_or_label_name(Bin) ->
+    fix_metric_or_label_name(Bin, false, <<>>).
 
-fix_metric_or_label_name([Char | Rest], Acc) when
-        Char >= $a, Char =< $z;
-        Char >= $A, Char =< $Z;
-        Char >= $0, Char =< $9;
-        Char =:= $: -> 
-    fix_metric_or_label_name(Rest, [Char | Acc]);
-fix_metric_or_label_name([$_ | Rest], [$_ | _] = Acc) ->
-    fix_metric_or_label_name(Rest, Acc);
-fix_metric_or_label_name([_Char | Rest], [$_ | _] = Acc) ->
-    fix_metric_or_label_name(Rest, Acc);
-fix_metric_or_label_name([_Char | Rest], Acc) ->
-    fix_metric_or_label_name(Rest, [$_ | Acc]);
-fix_metric_or_label_name([], Acc) ->
-    Acc.
+fix_metric_or_label_name(<<>>, _, Acc) ->
+    Acc;
+fix_metric_or_label_name(<<Char/utf8, Rest/binary>>, _, Acc)
+  when Char >= $a, Char =< $z;
+       Char >= $A, Char =< $Z;
+       Char >= $0, Char =< $9;
+       Char =:= $: ->
+    fix_metric_or_label_name(Rest, false, <<Acc/binary, Char/utf8>>);
+fix_metric_or_label_name(<<_/utf8, Rest/binary>>, true, Acc) ->
+    fix_metric_or_label_name(Rest, true, Acc);
+fix_metric_or_label_name(<<_/utf8, Rest/binary>>, false, Acc) ->
+    fix_metric_or_label_name(Rest, true, <<Acc/binary, $_>>).
 
 fix_unit(undefined) ->
     undefined;
 fix_unit(Unit) when is_atom(Unit) ->
-    fix_unit(atom_to_list(Unit));
-fix_unit("1") ->
-    "ratio";
+    fix_unit(atom_to_binary(Unit));
+fix_unit(<<"1">>) ->
+    <<"ratio">>;
 fix_unit(Unit) ->
-    lists:join("_per_", [guess_unit(U) || U <- string:split(Unit, "/", all)]).
+    case string:split(Unit, "/", all) of
+        [_] -> guess_unit(Unit);
+        List ->
+            iolist_to_binary(lists:join(<<"_per_">>, [guess_unit(U) || U <- List]))
+    end.
 
 guess_unit(Unit) ->
     case try_unit(Unit) of
@@ -182,75 +187,73 @@ guess_unit(Unit) ->
 %% https://unitsofmeasure.org/ucum
 
 %% Si base units
-try_unit("m") -> "meters";
-try_unit("s") -> "seconds";
-try_unit("g") -> "grams";
-try_unit("rad") -> "radians";
-try_unit("K") -> "kelvin";
-try_unit("C") -> "coulombs";
-try_unit("cd") -> "candelas";
+try_unit(<<"m">>) -> <<"meters">>;
+try_unit(<<"s">>) -> <<"seconds">>;
+try_unit(<<"g">>) -> <<"grams">>;
+try_unit(<<"rad">>) -> <<"radians">>;
+try_unit(<<"K">>) -> <<"kelvin">>;
+try_unit(<<"C">>) -> <<"coulombs">>;
+try_unit(<<"cd">>) -> <<"candelas">>;
 
 %% IT units
-try_unit("By") -> "Bytes";
-try_unit("bit") -> "bits";
-try_unit("Bd") -> "baud";
+try_unit(<<"By">>) -> <<"Bytes">>;
+try_unit(<<"bit">>) -> <<"bits">>;
+try_unit(<<"Bd">>) -> <<"baud">>;
 
 %% not in UCUM, but used in
 %% opentelemetry-collector:receiver/prometheusreceiver/internal/metricsbuilder.go
-try_unit("Bi") -> "bits";
+try_unit(<<"Bi">>) -> <<"bits">>;
 
 try_unit(_) -> not_found.
 
 %% IT unit prefixes
-try_unit_prefix([$K, $i | [_|_] = BaseUnit]) -> {"kibi", BaseUnit};
-try_unit_prefix([$M, $i | [_|_] = BaseUnit]) -> {"mebi", BaseUnit};
-try_unit_prefix([$G, $i | [_|_] = BaseUnit]) -> {"gibi", BaseUnit};
-try_unit_prefix([$T, $i | [_|_] = BaseUnit]) -> {"tebi", BaseUnit};
+try_unit_prefix(<<"Ki", BaseUnit/binary>>) -> {<<"kibi">>, BaseUnit};
+try_unit_prefix(<<"Mi", BaseUnit/binary>>) -> {<<"mebi">>, BaseUnit};
+try_unit_prefix(<<"Gi", BaseUnit/binary>>) -> {<<"gibi">>, BaseUnit};
+try_unit_prefix(<<"Ti", BaseUnit/binary>>) -> {<<"tebi">>, BaseUnit};
 
 %% Si prefixes
-try_unit_prefix([$Y | [_|_] = BaseUnit]) -> {"yotta", BaseUnit};
-try_unit_prefix([$Z | [_|_] = BaseUnit]) -> {"zetta", BaseUnit};
-try_unit_prefix([$E | [_|_] = BaseUnit]) -> {"exa", BaseUnit};
-try_unit_prefix([$P | [_|_] = BaseUnit]) -> {"peta", BaseUnit};
-try_unit_prefix([$T | [_|_] = BaseUnit]) -> {"tera", BaseUnit};
-try_unit_prefix([$G | [_|_] = BaseUnit]) -> {"giga", BaseUnit};
-try_unit_prefix([$M | [_|_] = BaseUnit]) -> {"mega", BaseUnit};
-try_unit_prefix([$k | [_|_] = BaseUnit]) -> {"kilo", BaseUnit};
-try_unit_prefix([$h | [_|_] = BaseUnit]) -> {"hecto", BaseUnit};
-try_unit_prefix([$d, $a | [_|_] = BaseUnit]) -> {"deka", BaseUnit};
-try_unit_prefix([$d | [_|_] = BaseUnit]) -> {"deci", BaseUnit};
-try_unit_prefix([$c | [_|_] = BaseUnit]) -> {"centi", BaseUnit};
-try_unit_prefix([$m | [_|_] = BaseUnit]) -> {"milli", BaseUnit};
-try_unit_prefix([$u | [_|_] = BaseUnit]) -> {"micro", BaseUnit};
-try_unit_prefix([$n | [_|_] = BaseUnit]) -> {"nano", BaseUnit};
-try_unit_prefix([$p | [_|_] = BaseUnit]) -> {"pico", BaseUnit};
-try_unit_prefix([$f | [_|_] = BaseUnit]) -> {"femto", BaseUnit};
-try_unit_prefix([$a | [_|_] = BaseUnit]) -> {"atto", BaseUnit};
-try_unit_prefix([$z | [_|_] = BaseUnit]) -> {"zepto", BaseUnit};
-try_unit_prefix([$y | [_|_] = BaseUnit]) -> {"yocto", BaseUnit};
+try_unit_prefix(<<"Y", BaseUnit/binary>>) -> {<<"yotta">>, BaseUnit};
+try_unit_prefix(<<"Z", BaseUnit/binary>>) -> {<<"zetta">>, BaseUnit};
+try_unit_prefix(<<"E", BaseUnit/binary>>) -> {<<"exa">>, BaseUnit};
+try_unit_prefix(<<"P", BaseUnit/binary>>) -> {<<"peta">>, BaseUnit};
+try_unit_prefix(<<"T", BaseUnit/binary>>) -> {<<"tera">>, BaseUnit};
+try_unit_prefix(<<"G", BaseUnit/binary>>) -> {<<"giga">>, BaseUnit};
+try_unit_prefix(<<"M", BaseUnit/binary>>) -> {<<"mega">>, BaseUnit};
+try_unit_prefix(<<"k", BaseUnit/binary>>) -> {<<"kilo">>, BaseUnit};
+try_unit_prefix(<<"h", BaseUnit/binary>>) -> {<<"hecto">>, BaseUnit};
+try_unit_prefix(<<"da", BaseUnit/binary>>) -> {<<"deka">>, BaseUnit};
+try_unit_prefix(<<"d", BaseUnit/binary>>) -> {<<"deci">>, BaseUnit};
+try_unit_prefix(<<"c", BaseUnit/binary>>) -> {<<"centi">>, BaseUnit};
+try_unit_prefix(<<"m", BaseUnit/binary>>) -> {<<"milli">>, BaseUnit};
+try_unit_prefix(<<"u", BaseUnit/binary>>) -> {<<"micro">>, BaseUnit};
+try_unit_prefix(<<"n", BaseUnit/binary>>) -> {<<"nano">>, BaseUnit};
+try_unit_prefix(<<"p", BaseUnit/binary>>) -> {<<"pico">>, BaseUnit};
+try_unit_prefix(<<"f", BaseUnit/binary>>) -> {<<"femto">>, BaseUnit};
+try_unit_prefix(<<"a", BaseUnit/binary>>) -> {<<"atto">>, BaseUnit};
+try_unit_prefix(<<"z", BaseUnit/binary>>) -> {<<"zepto">>, BaseUnit};
+try_unit_prefix(<<"y", BaseUnit/binary>>) -> {<<"yocto">>, BaseUnit};
 
 try_unit_prefix(_) -> not_found.
 
 preamble(Name, Description, Unit, Data) ->
-    [
-        preamble_type(Name, Data),
-        preamble_unit(Name, Unit),
-        preamble_help(Name, Description),
-        "\n"
+    [preamble_type(Name, Data),
+     preamble_unit(Name, Unit),
+     preamble_help(Name, Description)
     ].
 
 preamble_type(Name, Data) ->
-    ["# TYPE ", Name, " ", metric_type(Name, Data)].
+    [<<"# TYPE ">>, Name, ?SP, metric_type(Name, Data), ?LF].
 
 preamble_help(_Name, undefined) ->
     [];
 preamble_help(Name, Description) ->
-    ["\n# HELP ", Name, " ", escape_metric_help(Description)].
+    [<<"# HELP ">>, Name, ?SP, escape_metric_help(Description), ?LF].
 
 preamble_unit(_Name, undefined) ->
     [];
 preamble_unit(Name, Unit) ->
-    ["\n# UNIT ", Name, " ", Unit].
+    [<<"# UNIT ">>, Name, ?SP, Unit, ?LF].
 
 data(_MetricName, #sum{aggregation_temporality=temporality_delta}, _Scope, _Opts) ->
     invalid_temporality;
@@ -279,7 +282,7 @@ data(MetricName, Datapoints, Scope, AddCreated, #{add_scope_info:=AddScopeInfo})
 
 datapoint(#datapoint{} = DP, MetricName, AddCreated, ScopeLabels, [Points, Created]) ->
     Labels = surround_labels(join_labels(ScopeLabels, labels(DP#datapoint.attributes))),
-    Point = [MetricName, Labels, " ", number_to_binary(DP#datapoint.value), "\n"],
+    Point = [MetricName, Labels, " ", number_to_binary(DP#datapoint.value), ?LF],
     Created1 = created(AddCreated, Created, MetricName, Labels, DP#datapoint.start_time),
     [[Point | Points], Created1];
 datapoint(#histogram_datapoint{} = DP, MetricName, AddCreated, ScopeLabels, [Points, Created]) ->
@@ -287,17 +290,17 @@ datapoint(#histogram_datapoint{} = DP, MetricName, AddCreated, ScopeLabels, [Poi
     SurroundedLabels = surround_labels(Labels),
 
     Count = lists:sum(DP#histogram_datapoint.bucket_counts),
-    CountPoint = [MetricName, "_count", SurroundedLabels, " ", number_to_binary(Count), "\n"],
+    CountPoint = [MetricName, <<"_count">>, SurroundedLabels, ?SP, number_to_binary(Count), ?LF],
 
     SumPoint = case (DP#histogram_datapoint.sum >= 0) and lists:all(fun(B) -> B >=0 end, DP#histogram_datapoint.explicit_bounds) of
-        true -> [MetricName, "_sum", SurroundedLabels, " ", number_to_binary(DP#histogram_datapoint.sum), "\n"];
+        true -> [MetricName, <<"_sum">>, SurroundedLabels, ?SP, number_to_binary(DP#histogram_datapoint.sum), ?LF];
         false -> []
     end,
 
     {Buckets, _} = lists:mapfoldl(
         fun({C, Le}, Sum) ->
-            HistoLabels = surround_labels(join_labels(Labels, render_label_pair({"le", Le}))),
-            {[MetricName, "_bucket", HistoLabels, " ", number_to_binary(Sum + C), "\n"], Sum + C}
+            HistoLabels = surround_labels(join_labels(Labels, render_label_pair({<<"le">>, Le}))),
+            {[MetricName, <<"_bucket">>, HistoLabels, ?SP, number_to_binary(Sum + C), ?LF], Sum + C}
         end,
         0,
         lists:zip(DP#histogram_datapoint.bucket_counts, DP#histogram_datapoint.explicit_bounds ++ [<<"+Inf">>])
@@ -310,14 +313,14 @@ datapoint(#histogram_datapoint{} = DP, MetricName, AddCreated, ScopeLabels, [Poi
 created(false, Created, _MetricName, _Labels, _StartTime) ->
     Created;
 created(true, Created, MetricName, Labels, StartTime) ->
-    [[MetricName, "_created", Labels, " ", number_to_binary(opentelemetry:timestamp_to_nano(StartTime)), "\n"] | Created].
+    [[MetricName, <<"_created">>, Labels, ?SP, number_to_binary(opentelemetry:timestamp_to_nano(StartTime)), ?LF] | Created].
 
 join_labels(<<>>, L) -> L;
 join_labels(L, <<>> )-> L;
-join_labels(L1, L2) -> [L1, ",", L2].
+join_labels(L1, L2) -> [L1, $,, L2].
 
 surround_labels(<<>>) -> [];
-surround_labels(Labels) -> ["{", Labels, "}"].
+surround_labels(Labels) -> [${, Labels, $}].
 
 number_to_binary(Int) when is_integer(Int) ->
     integer_to_binary(Int);
@@ -325,7 +328,7 @@ number_to_binary(Float) when is_float(Float) ->
     float_to_binary(Float, [short]).
 
 labels(#instrumentation_scope{name=Name, version=Version}) when Name /= undefined, Version /= undefined ->
-    <<(labels([{"otel_scope_name", Name}, {"otel_scope_version", Version}]))/binary>>;
+    <<(labels([{<<"otel_scope_name">>, Name}, {<<"otel_scope_version">>, Version}]))/binary>>;
 labels(#instrumentation_scope{}) ->
     <<>>;
 labels(Attributes) when is_map(Attributes) ->
@@ -345,22 +348,22 @@ render_label_pair({Name, Value}) ->
   << (render_label_name(Name))/binary, "=\"", (escape_label_value(Value))/binary, "\"" >>.
 
 render_label_name(Name) when is_atom(Name) ->
-    render_label_name(atom_to_list(Name));
-render_label_name(Name) when is_binary(Name) ->
-    render_label_name(binary_to_list(Name));
+    render_label_name(atom_to_binary(Name));
 render_label_name(Name) when is_list(Name) ->
-    iolist_to_binary(lists:reverse(fix_metric_or_label_name(Name))).
+    render_label_name(list_to_binary(Name));
+render_label_name(Name) when is_binary(Name) ->
+    fix_metric_or_label_name(Name).
 
 metric_type(Name, #gauge{}) when is_map_key(Name, ?INFO_METRICS) ->
-  "info";
+  <<"info">>;
 metric_type(_Name, #sum{is_monotonic=true}) ->
-  "counter";
+  <<"counter">>;
 metric_type(_Name, #sum{is_monotonic=false}) ->
-  "gauge";
+  <<"gauge">>;
 metric_type(_Name, #gauge{}) ->
-  "gauge";
+  <<"gauge">>;
 metric_type(_Name, #histogram{}) ->
-  "histogram".
+  <<"histogram">>.
 
 escape_metric_help(Help) ->
   escape_string(fun escape_help_char/1, Help).
@@ -409,7 +412,7 @@ escape_help_char(X) ->
 -ifdef(TEST).
 
 -define(TEST_DEFAULT_OPTS, #{add_scope_info => true, add_target_info => true,
-                             add_total_suffix => true, order => ordered}).
+                             add_total_suffix => true, order => reversed}).
 
 nano_to_timestamp(Nano) ->
     Offset = erlang:time_offset(),
@@ -421,20 +424,20 @@ metrics_to_string(Metrics) ->
 metrics_to_string(Metrics, Opts) ->
     Resource = otel_resource:create(#{"res" => "b"}, "url"),
     {ok, Opts1} = init(maps:merge(?TEST_DEFAULT_OPTS, Opts)),
-    lists:flatten(io_lib:format("~ts", [parse_metrics(Metrics, Resource, Opts1)])).
+    iolist_to_binary(parse_metrics(Metrics, Resource, Opts1)).
 
 lines_join(Lines) ->
-    string:join(Lines, "\n").
+    iolist_to_binary(lists:join(?LF, Lines)).
 
 fix_metric_name_test_() ->
     [
-        ?_assertEqual("abc_a", lists:reverse(fix_metric_or_label_name("abc_$a"))),
-        ?_assertEqual("abc_a", lists:reverse(fix_metric_or_label_name("abc/(a"))),
-        ?_assertEqual("abc_a", lists:reverse(fix_metric_or_label_name("abc__a"))),
-        ?_assertEqual("_aaa", lists:reverse(fix_metric_or_label_name("1aaa"))),
-        ?_assertEqual("_2aa", lists:reverse(fix_metric_or_label_name("12aa"))),
-        ?_assertEqual("_aa", lists:reverse(fix_metric_or_label_name("1_aa"))),
-        ?_assertEqual("_aa", lists:reverse(fix_metric_or_label_name("1=aa")))
+        ?_assertEqual(<<"abc_a">>, fix_metric_or_label_name(<<"abc_$a">>)),
+        ?_assertEqual(<<"abc_a">>, fix_metric_or_label_name(<<"abc/(a">>)),
+        ?_assertEqual(<<"abc_a">>, fix_metric_or_label_name(<<"abc__a">>)),
+        ?_assertEqual(<<"_aaa">>, fix_metric_or_label_name(<<"1aaa">>)),
+        ?_assertEqual(<<"_2aa">>, fix_metric_or_label_name(<<"12aa">>)),
+        ?_assertEqual(<<"_aa">>, fix_metric_or_label_name(<<"1_aa">>)),
+        ?_assertEqual(<<"_aa">>, fix_metric_or_label_name(<<"1=aa">>))
     ].
 
 empty_metrics_test() ->
