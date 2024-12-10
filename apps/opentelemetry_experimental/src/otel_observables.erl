@@ -117,5 +117,5 @@ handle_observations(Ctx, MetricsTab, ExemplarsTab, Stream, [Result | Rest]) ->
     handle_observations(Ctx, MetricsTab, ExemplarsTab, Stream, Rest);
 handle_observations(_Ctx, _MetricsTab, _ExemplarsTab, _Stream, Result) ->
     ?LOG_DEBUG("Metric callback return must be a list of type [{number(), map()}] or "
-               "[{atom(), [{number(), map()}]}] but got", [Result]),
+               "[{atom(), [{number(), map()}]}] but got ~p", [Result]),
     ok.
